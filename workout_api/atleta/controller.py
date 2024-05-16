@@ -1,15 +1,19 @@
 from datetime import datetime
+from typing import Optional
 from uuid import uuid4
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, Query, status
 from pydantic import UUID4
 
-from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate
+from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate, AtletaOutPartial
 from workout_api.atleta.models import AtletaModel
 from workout_api.categorias.models import CategoriaModel
 from workout_api.centro_treinamento.models import CentroTreinamentoModel
 
 from workout_api.contrib.dependencies import DatabaseDependency
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
+
+from fastapi_pagination import Page, paginate
 
 router = APIRouter()
 
@@ -45,6 +49,7 @@ async def post(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail=f'O centro de treinamento {centro_treinamento_nome} não foi encontrado.'
         )
+
     try:
         atleta_out = AtletaOut(id=uuid4(), created_at=datetime.utcnow(), **atleta_in.model_dump())
         atleta_model = AtletaModel(**atleta_out.model_dump(exclude={'categoria', 'centro_treinamento'}))
@@ -54,11 +59,17 @@ async def post(
         
         db_session.add(atleta_model)
         await db_session.commit()
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail='Ocorreu um erro ao inserir os dados no banco'
-        )
+    except IntegrityError as e:
+        if 'cpf' in str(e):
+            raise HTTPException(
+                status_code=status.HTTP_303_SEE_OTHER, 
+                detail=f"Já existe um atleta cadastrado com o CPF: {atleta_in.cpf}"
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+                detail='Ocorreu um erro ao inserir os dados no banco'
+            )
 
     return atleta_out
 
@@ -67,12 +78,20 @@ async def post(
     '/', 
     summary='Consultar todos os Atletas',
     status_code=status.HTTP_200_OK,
-    response_model=list[AtletaOut],
+    response_model=Page[AtletaOutPartial],
 )
-async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
-    atletas: list[AtletaOut] = (await db_session.execute(select(AtletaModel))).scalars().all()
+async def query(db_session: DatabaseDependency, nome: Optional[str] = Query(None), cpf: Optional[str] = Query(None)) -> Page[AtletaOutPartial]:
+    query = select(AtletaModel)
+
+    if nome:
+        query = query.filter_by(nome=nome)
+    if cpf:
+        query = query.filter_by(cpf=cpf)
+
+    atletas = (await db_session.execute(query)).scalars().all()
     
-    return [AtletaOut.model_validate(atleta) for atleta in atletas]
+    all_atletas = [AtletaOutPartial.model_validate(atleta) for atleta in atletas]
+    return paginate(all_atletas)
 
 
 @router.get(
